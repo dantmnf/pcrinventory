@@ -1,0 +1,7 @@
+/venv
+__pycache__
+/log/*
+/config/config.yaml
+/config/device-config.json
+.vscode
+*.ipynb
