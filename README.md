@@ -133,6 +133,6 @@ pcrhelper>
 
 ## Credits
 
-程序架构来自 https://github.com/ninthDevilHAUNSTER/ArknightsAutoHelper。
+程序架构来自 https://github.com/ninthDevilHAUNSTER/ArknightsAutoHelper 。
 
-物品图标来自 https://pcr.satroki.tech/，版权归原作者（Cygames）所有。
+物品图标来自 https://pcr.satroki.tech/ ，版权归原作者（Cygames）所有。
