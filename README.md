@@ -129,7 +129,7 @@ pcrhelper>
 * 当前识别方式（截图与所有已知物品比较）在当前数据量（735 种已知物品）下速度较慢（15 个物品约 750ms）
 * 物品图标干扰数量提取时，OCR 会识别错误：
 
-    [screenshot placeholder]
+    ![](https://user-images.githubusercontent.com/2252500/141682428-b85bcfdb-1588-457c-93b0-523cb9389d44.png)
 
 ## Credits
 
