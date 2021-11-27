@@ -86,7 +86,7 @@ TODO：从 Actions artifacts 或 Releases 中下载 PyInstaller 打包后的二�
 ## 使用说明
 
 ```
-$ python3 akhelper.py
+$ python3 pcrinventory.py
 commands (prefix abbreviation accepted):
     connect [connector type] [connector args ...]
         连接到设备

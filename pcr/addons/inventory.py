@@ -73,14 +73,19 @@ def recognize_item(icon: Image.Image, vh):
         #     remove_contour = True
         if remove_contour:
             th_img4qty[labels == i] = 0
-            img4qty.array[labels == i] = 255
+            # img4qty.array[labels == i] = 255
 
     ctr, h = cv2.findContours(th_img4qty, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for idx, c in enumerate(ctr):
         x, y, w, h = cv2.boundingRect(c)
         if x == 0 or y == 0 or x+w >= img4qty.width-1 or y+h > img4qty.height-1 or y > img4qty.height * 0.3 or y+h < img4qty.height * 0.7 or cv2.contourArea(c) <= (math.sqrt(7)/1080*vh*100) ** 2:
             cv2.drawContours(img4qty.array, ctr, idx, 255, -1)
-    img4qty = Image.fromarray(255-th_img4qty, 'L')
+    mask = cv2.dilate(th_img4qty, np.ones((3, 3), np.uint8), iterations=1)
+    img4qty.array[mask == 0] = 255
+    cropbox_img4qty = imgreco.imgops.cropbox_blackedge2(Image.fromarray(th_img4qty, 'L'), x_threshold=img4qty.height)
+    if cropbox_img4qty:
+        img4qty = img4qty.crop(cropbox_img4qty)
+        img4qty = Image.fromarray(cv2.copyMakeBorder(img4qty.array, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=255), 'L')
     # img4qty = imgreco.imgops.enhance_contrast(img4qty, 64, 160)
     return *comparisions[0], img4qty
 
