@@ -2,6 +2,7 @@ from random import randint
 import math
 from collections import OrderedDict
 from time import sleep
+import time
 import cv2
 import numpy as np
 from util import cvimage as Image
@@ -43,17 +44,35 @@ def crop_inventory(screenshot: Image.Image):
                 result.append(equip_icon)
     return result
 
+
+def batch_compare_mse(roi, stacked_templates):
+    all_diff = stacked_templates - roi
+    np.square(all_diff, out=all_diff)
+    all_mse = np.average(all_diff, axis=tuple(range(len(all_diff.shape)))[1:])
+    return all_mse
+
 def recognize_item(icon: Image.Image, vh):
-    from .inventory_cache import templates, inventory_mask
+    from .inventory_cache import inventory_mask, all_itemid, all_icons_16, all_icons
     masked_icon = icon.resize((48, 48))
     masked_icon.array[inventory_mask == 0] = [0, 0, 0]
-    comparisions = []
-    for equipid, template in templates.items():
-        template = template.copy()
-        template.array[inventory_mask == 0] = [0, 0, 0]
-        comparisions.append((equipid, imgreco.imgops.compare_mse(masked_icon, template)))
+    icon16 = masked_icon.resize((16, 16))
+    comp16 = batch_compare_mse(icon16.array, all_icons_16)
+    min16 = np.min(comp16)
+    match_idx = np.where(comp16 <= (min16 * 2))[0]
+    if len(match_idx) == 0:
+        comparisions = [('999999', 114514)]
+    else:
+        # print("1st stage match:", match_idx)
+        second_match_ids = all_itemid[match_idx]
+        second_match_icons = all_icons[match_idx]
+        comp = batch_compare_mse(masked_icon.array, second_match_icons)
+        comparisions = list(zip(second_match_ids, comp))
+    # for equipid, template in templates.items():
+    #     template = template.copy()
+    #     template.array[inventory_mask == 0] = [0, 0, 0]
+    #     comparisions.append((equipid, imgreco.imgops.compare_mse(masked_icon, template)))
+    # print("2nd stage match:", comparisions)
     comparisions.sort(key=lambda x:x[1])
-
 
     icon4qty = icon.convert('L')
     img4qty = icon4qty.crop((0, int(round(149/193*icon.height)), icon.width, int(round(179/193*icon.height))))
@@ -104,9 +123,13 @@ class InventoryAddon(AddonBase):
         while True:
             last_itemids = list(items.keys())
             screenshot = self.device.screenshot(cached=False).convert('BGR')
+            t0 = time.perf_counter()
             item_icons = crop_inventory(screenshot)
             for icon in item_icons:
+                t10 = time.perf_counter()
                 itemid, score, qtyimg = recognize_item(icon, vh)
+                t11 = time.perf_counter()
+                logger.logtext(f"Recognize item {itemid} with score {score} in {t11-t10:.3f}s")
                 if score > 1000:
                     logger.logimage(icon)
                     logger.logtext(f'nearest match {itemid} with score {score}')
@@ -122,6 +145,8 @@ class InventoryAddon(AddonBase):
                 if qty > 0:
                     items[itemid] = qty
             current_itemids = list(items.keys())
+            t1 = time.perf_counter()
+            logger.logtext(f'page recognized in {t1-t0:.3f}s')
             new_itemids = current_itemids[len(last_itemids):]
             if new_itemids:
                 stall_count = 0
@@ -138,8 +163,8 @@ class InventoryAddon(AddonBase):
             yoffset = randint(int(-5*vh), int(5*vh))
             swipe0[1] += yoffset
             swipe1[1] += yoffset
-            self.device.touch_swipe2(swipe0, np.asarray(swipe1) - np.asarray(swipe0), 700)
-            sleep(0.4)
+            self.device.touch_swipe2(swipe0, np.asarray(swipe1) - np.asarray(swipe0), 500)
+            sleep(0.2)
         self.logger.info('done')
 
         return items
