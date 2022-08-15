@@ -1,6 +1,9 @@
+from __future__ import annotations
 import time
 from contextlib import AbstractContextManager, nullcontext
 from abc import ABC, abstractmethod
+
+from automator.control.types import Controller
 
 class Frontend(ABC):
     @abstractmethod
@@ -20,7 +23,7 @@ class Frontend(ABC):
         time.sleep(secs)
 
     @abstractmethod
-    def request_device_connector(self):
+    def request_device_connector(self) -> Controller:
         """request a device connector (interactively) from frontend"""
         return None
 

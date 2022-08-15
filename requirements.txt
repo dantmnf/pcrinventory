@@ -1,6 +1,15 @@
-opencv-python<4.5.4
+coloredlogs==15.0.1
+scipy
 numpy
+opencv-python  # make pip happy for packages requiring ^opencv-python$
+# opencv-contrib-python  # overwrites files installed by opencv-python
 pillow
+requests
+# requests-cache
 ruamel.yaml==0.17.17
 colorama==0.4.4; sys_platform == 'win32'
-coloredlogs==15.0.1
+textdistance==4.2.1
+# dataclasses_json
+lz4
+pywin32; sys_platform == 'win32'
+

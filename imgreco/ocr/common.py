@@ -48,9 +48,6 @@ class OcrResult(OcrObject):
 
     def __repr__(self):
         return 'OcrResult[%s]' % repr(self.text)
-    
-    def __str__(self):
-        return self.text
 
 
 class OcrEngine(ABC):

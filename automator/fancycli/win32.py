@@ -1,4 +1,5 @@
 import ctypes
+from functools import lru_cache
 import msvcrt
 import os
 import struct
@@ -26,7 +27,24 @@ GetModuleHandle = k32.GetModuleHandleW
 FlushConsoleInputBuffer = k32.FlushConsoleInputBuffer
 GetFileType = k32.GetFileType
 FILE_TYPE_CHAR = 0x0002
+RtlGetVersion = ctypes.windll.ntdll.RtlGetVersion
 
+class OSVERSIONINFOW(ctypes.Structure):
+    _fields_ = [
+        ('dwOSVersionInfoSize', ctypes.c_ulong),
+        ('dwMajorVersion', ctypes.c_ulong),
+        ('dwMinorVersion', ctypes.c_ulong),
+        ('dwBuildNumber', ctypes.c_ulong),
+        ('dwPlatformId', ctypes.c_ulong),
+        ('szCSDVersion', ctypes.c_wchar * 128),
+    ]
+
+
+@lru_cache(1)
+def _build_number():
+    info = OSVERSIONINFOW(dwOSVersionInfoSize=ctypes.sizeof(OSVERSIONINFOW))
+    RtlGetVersion(ctypes.byref(info))
+    return info.dwBuildNumber
 
 def getch_timeout(timeout):
     hstdin = GetStdHandle(STD_INPUT_HANDLE)
@@ -95,39 +113,41 @@ def check_control_code():
 
     hout = GetStdHandle(STD_OUTPUT_HANDLE)
     outmode = ctypes.c_uint32()
+    try:
+        if _build_number() >= 14393:
+            logger.debug('using Windows ENABLE_VIRTUAL_TERMINAL_PROCESSING')
+            if not GetConsoleMode(hout, ctypes.byref(outmode)):
+                return False
+            if not SetConsoleMode(hout, outmode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING):
+                return False
+            GetConsoleMode(hout, ctypes.byref(outmode))
+            SetConsoleMode(hout, outmode.value | DISABLE_NEWLINE_AUTO_RETURN)
+            # if isatty(sys.stdin):
+            #     import atexit
+            #     hin = GetStdHandle(STD_INPUT_HANDLE)
+            #     GetConsoleMode(hin, ctypes.byref(outmode))
+            #     SetConsoleMode(hin, outmode.value | ENABLE_VIRTUAL_TERMINAL_INPUT)
+            #     oldmode = outmode.value
+            #     def fini():
+            #         SetConsoleMode(hin, oldmode)
+            #     atexit.register(fini)
+            return True
 
-    if sys.getwindowsversion().build >= 14393:
-        logger.debug('using Windows ENABLE_VIRTUAL_TERMINAL_PROCESSING')
-        if not GetConsoleMode(hout, ctypes.byref(outmode)):
-            return False
-        if not SetConsoleMode(hout, outmode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING):
-            return False
-        GetConsoleMode(hout, ctypes.byref(outmode))
-        SetConsoleMode(hout, outmode.value | DISABLE_NEWLINE_AUTO_RETURN)
-        # if isatty(sys.stdin):
-        #     import atexit
-        #     hin = GetStdHandle(STD_INPUT_HANDLE)
-        #     GetConsoleMode(hin, ctypes.byref(outmode))
-        #     SetConsoleMode(hin, outmode.value | ENABLE_VIRTUAL_TERMINAL_INPUT)
-        #     oldmode = outmode.value
-        #     def fini():
-        #         SetConsoleMode(hin, oldmode)
-        #     atexit.register(fini)
-        return True
-
-    else:
-        if not GetConsoleMode(hout, ctypes.byref(outmode)):
-            return False
-        # check for ansicon/ConEmu hook dlls
-        hooked = bool(GetModuleHandle('ansi32.dll') or GetModuleHandle('ansi64.dll') or GetModuleHandle(
-            'conemuhk64.dll') or GetModuleHandle('conemuhk.dll'))
-        if hooked:
-            logger.debug('using ansicon/conemu hook')
         else:
-            logger.debug('using colorama as fallback')
-            import colorama
-            colorama.init()  # for basic color output
-        return hooked
+            if not GetConsoleMode(hout, ctypes.byref(outmode)):
+                return False
+            # check for ansicon/ConEmu hook dlls
+            hooked = bool(GetModuleHandle('ansi32.dll') or GetModuleHandle('ansi64.dll') or GetModuleHandle(
+                'conemuhk64.dll') or GetModuleHandle('conemuhk.dll'))
+            if hooked:
+                logger.debug('using ansicon/conemu hook')
+            else:
+                logger.debug('using colorama as fallback')
+                import colorama
+                colorama.init()  # for basic color output
+            return hooked
+    finally:
+        logger.setLevel(logging.ERROR)
 
 
 __all__ = ['getch_timeout', 'isatty', 'check_control_code']

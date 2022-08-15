@@ -5,6 +5,7 @@ from time import sleep
 import time
 import cv2
 import numpy as np
+from automator import AddonBase, cli_command
 from util import cvimage as Image
 from util import richlog
 import imgreco.imgops
@@ -109,12 +110,10 @@ def recognize_item(icon: Image.Image, vh):
     return *comparisions[0], img4qty
 
 
-from automator import AddonBase
 
 class InventoryAddon(AddonBase):
     def on_attach(self):
         self.tesseract: imgreco.ocr.OcrEngine = imgreco.ocr.tesseract.Engine(lang=None, model_name='pcr_nums')
-        self.register_cli_command('inventory', self.cli_inventory, self.cli_inventory.__doc__)
 
     def get_inventory_items(self):
         vw, vh = self.vw, self.vh
@@ -122,7 +121,7 @@ class InventoryAddon(AddonBase):
         stall_count = 0
         while True:
             last_itemids = list(items.keys())
-            screenshot = self.device.screenshot(cached=False).convert('BGR')
+            screenshot = self.control.screenshot().convert('BGR')
             t0 = time.perf_counter()
             item_icons = crop_inventory(screenshot)
             for icon in item_icons:
@@ -163,12 +162,13 @@ class InventoryAddon(AddonBase):
             yoffset = randint(int(-5*vh), int(5*vh))
             swipe0[1] += yoffset
             swipe1[1] += yoffset
-            self.device.touch_swipe2(swipe0, np.asarray(swipe1) - np.asarray(swipe0), 500)
-            sleep(0.2)
+            self.control.input.touch_swipe(*swipe0, *swipe1, move_duration=0.3, hold_before_release=0.2)
+            sleep(0.3)
         self.logger.info('done')
 
         return items
 
+    @cli_command('inventory')
     def cli_inventory(self, argv):
         """inventory
         仓库识别。

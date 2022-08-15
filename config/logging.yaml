@@ -1,4 +1,5 @@
 version: 1
+disable_existing_loggers: false
 handlers:
   console:
     class: logging.StreamHandler
@@ -9,7 +10,7 @@ handlers:
     class: logging.handlers.TimedRotatingFileHandler
     formatter: precise
     # 读取 config.logfile 中的绝对路径
-    filename: ext://config.logfile
+    filename: ext://app.logfile
     level: NOTSET
     encoding: utf-8
     when: D
@@ -21,6 +22,8 @@ root:
 loggers:
   PIL.PngImagePlugin:
     propagate: false
+  cnocr.cn_ocr:
+    level: WARNING
 formatters:
   precise:
     format: '%(asctime)s ! %(funcName)s @ %(filename)s:%(lineno)d ! %(levelname)s ! %(message)s'

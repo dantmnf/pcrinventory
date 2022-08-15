@@ -1,19 +1,25 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from typing import Union
+    from typing import Union, Optional
+    from automator import BaseAutomator
+    from automator.control.types import Controller
 del TYPE_CHECKING
-import os
 import sys
+import os
 import time
 
-import config
+import app
 
 from .fancycli import fancywait
 from .fancycli.platform import isatty
 
+app.init()
 
+helper: BaseAutomator = None
 prompt_prefix = 'akhelper'
+
+device: Optional[Controller] = None
 
 def skipcallback(handler):
     raise StopIteration
@@ -83,8 +89,13 @@ def _alarm_context_factory():
         return BellAlarmContext()
     return AlarmContext()
 
-
-device = None
+def _connect_device(newdevice):
+    global device
+    device = newdevice
+    if helper is not None:
+        olddevice = helper.connect_device(device)
+        if olddevice is not None:
+            olddevice.close()
 
 
 def connect(argv):
@@ -92,60 +103,87 @@ def connect(argv):
     connect [connector type] [connector args ...]
         连接到设备
         支持的设备类型：
-        connect adb [serial or tcpip endpoint]
+        connect adb <serial or tcpip endpoint>
+        connect ident [identifier]
     """
-    connector_type = 'adb'
     if len(argv) > 1:
         connector_type = argv[1]
         connector_args = argv[2:]
     else:
-        connector_args = []
+        return _interactive_connect()
     if connector_type == 'adb':
-        _connect_adb(connector_args)
+        return _connect_adb(connector_args)
+    elif connector_type == 'ident':
+        return _connect_ident(connector_args)
     else:
         print('unknown connector type:', connector_type)
+    return 1
+
+
+def _interactive_connect():
+    from automator.control.targets import enum_targets, auto_connect
+    targets = enum_targets()
+    try:
+        _connect_device(auto_connect(targets, app.config.device.adb_always_use_device))
+    except IndexError:
+        if len(targets) == 0:
+            print("当前无设备连接")
+            raise
+        print("检测到多台设备")
+        for i, record in enumerate(targets):
+            print("%2d. %s" % (i+1, record))
+        num = 0
+        while True:
+            try:
+                num = int(input("请输入序号选择设备: "))
+                if not 1 <= num < len(targets)+1:
+                    raise ValueError()
+                break
+            except ValueError:
+                print("输入不合法，请重新输入")
+        target = targets[num-1]
+        _connect_device(target.create_controller())
 
 
 def _connect_adb(args):
-    from connector.ADBConnector import ADBConnector, ensure_adb_alive
-    ensure_adb_alive()
-    global device
-    if len(args) == 0:
-        try:
-            device = ADBConnector.auto_connect()
-        except IndexError:
-            devices = ADBConnector.available_devices()
-            if len(devices) == 0:
-                print("当前无设备连接")
-                raise
-            print("检测到多台设备")
-            for i, (serial, status) in enumerate(devices):
-                print("%2d. %s\t[%s]" % (i, serial, status))
-            num = 0
-            while True:
-                try:
-                    num = int(input("请输入序号选择设备: "))
-                    if not 0 <= num < len(devices):
-                        raise ValueError()
-                    break
-                except ValueError:
-                    print("输入不合法，请重新输入")
-            device_name = devices[num][0]
-            device = ADBConnector(device_name)
-    else:
+    from automator.control.adb.targets import get_target_from_adb_serial
+    if len(args) == 1:
         serial = args[0]
-        device = ADBConnector(serial)
+        _connect_device(get_target_from_adb_serial(serial).create_controller())
+        return 0
+    else:
+        print('usage: connect adb <serial>')
+        return 1
 
+def _connect_ident(args):
+    from automator.control.targets import enum_targets
+    targets = {x.override_identifier: x for x in enum_targets() if getattr(x, 'override_identifier', None) is not None}
+
+    if len(args) != 1:
+        print('usage: connect ident [identifier]')
+        print('current enumerated identifiers:')
+        for key in targets:
+            print(key)
+        return
+    ident = args[0]
+    _connect_device(targets[ident].create_controller())
+    return 0
 
 def _ensure_device():
     if device is None:
         connect(['connect'])
-    device.ensure_alive()
+    device.adb.create_session().close()
 
 
-def command_internal(argv: Union[str, list[str]]):
+def command_internal(cmd: Union[str, list[str]]):
+    if isinstance(cmd, str):
+        import shlex
+        argv = shlex.split(cmd)
+    else:
+        argv = cmd
     if len(argv) == 0 or argv[0] == '?' or argv[0] == 'help':
-        print(' '.join(x[0] for x in interactive_cmds))
+        # print(' '.join(x[0] for x in interactive_cmds))
+        helpcmds(interactive_cmds)
         return 0
     cmd = match_cmd(argv[0], interactive_cmds)
     if cmd is not None:
@@ -163,13 +201,8 @@ raise_on_error: bool = True
 
 
 def command(cmd: Union[str, list[str]]):
-    if isinstance(cmd, str):
-        import shlex
-        argv = shlex.split(cmd)
-    else:
-        argv = cmd
-    errorlevel = command_internal(argv)
-    if errorlevel != 0 and raise_on_error:
+    errorlevel = command_internal(cmd)
+    if errorlevel is not None and errorlevel != 0 and raise_on_error:
         raise RuntimeError(errorlevel)
     return errorlevel
 
@@ -198,7 +231,7 @@ def interactive(argv):
             import readline
     except ImportError:
         pass
-    if instance_id := config.get_instance_id():
+    if instance_id := app.get_instance_id():
         title = f"{prompt_prefix}-{instance_id}"
     else:
         title = prompt_prefix
@@ -244,6 +277,19 @@ def help(argv):
     helpcmds(global_cmds)
 
 
+def debug(argv):
+    import IPython
+    from IPython.terminal.embed import InteractiveShellEmbed
+    old_instance = InteractiveShellEmbed.instance
+    def hook_instance(*args, **kwargs):
+        instance = old_instance(*args, **kwargs)
+        instance.register_magic_function(command_internal, magic_kind='line', magic_name='akhelper')
+        return instance
+    InteractiveShellEmbed.instance = hook_instance
+    IPython.embed(banner1='use "%akhelper command" to access akhelper commands', colors='neutral')
+    InteractiveShellEmbed.instance = old_instance
+
+
 def exit(argv):
     sys.exit()
 
@@ -263,15 +309,28 @@ def match_cmd(first, avail_cmds):
         print("matched commands: " + ','.join(x[0] for x in targetcmd))
         return None
 
-def _init(helper_class):
-    config.enable_logging()
-    global helper, context
+def _configure(prompt, helper_class):
+    global prompt_prefix, helper, context
+    prompt_prefix = prompt
     helper, context = _create_helper(helper_class)
-    global_cmds.extend([*helper._cli_commands.values(), ('interactive', interactive, interactive.__doc__), ('help', help, help.__doc__)])
-    interactive_cmds.extend([('connect', connect, connect.__doc__), *helper._cli_commands.values(), ('exit', exit, '')])
+    from .addon import _cli_registry
+    addon_cmds = []
+    for name, record in _cli_registry.items():
+        def capture_value(owner, func_name):
+            def cli_handler(argv):
+                return getattr(helper.addon(owner), func_name)(argv)
+            return cli_handler
+        addon_cmds.append((name, capture_value(record.owner, record.attr), record.get_help(helper)))
+    global_cmds.extend([*addon_cmds, ('interactive', interactive, interactive.__doc__), ('help', help, help.__doc__)])
+    interactive_cmds.extend([('connect', connect, connect.__doc__), *addon_cmds, ('exit', exit, '')])
+    if app.config.debug:
+        global_cmds.append(('debug', debug, ''))
+        interactive_cmds.append(('debug', debug, ''))
 
 
 def main(argv):
+    if helper is None:
+        raise ValueError('launcher not configured')
     global argv0
     argv0 = argv[0]    
     if len(argv) < 2:

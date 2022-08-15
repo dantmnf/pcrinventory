@@ -1,160 +1,96 @@
 from __future__ import annotations
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+
 if TYPE_CHECKING:
-    from typing import Annotated, Callable, ClassVar, Sequence, Tuple, TypeVar, Union, Type, ForwardRef
-    from numbers import Real
+    from typing import TypeVar, Union, Type, ForwardRef, Optional
+    from .addon import AddonBase
+    from automator.control.types import Controller
     TAddon = TypeVar('TAddon')
 del TYPE_CHECKING
 
-import os
-import time
 import logging
-from random import randint, uniform, gauss
-from fractions import Fraction
-
-import numpy as np
-
-import config
-import imgreco.imgops
-
-from connector import auto_connect
-from connector.ADBConnector import ADBConnector, ensure_adb_alive
-from .frontend import Frontend, DummyFrontend
-from .mixin import AddonMixin
 
 logger = logging.getLogger('helper')
 
-class AddonBase(AddonMixin):
-    alias : ClassVar[Union[str, None]] = None
 
-    def __init__(self, helper):
-        super().__init__()
-        self.helper : BaseAutomator = helper
-        self.logger = logging.getLogger(type(self).__name__)
-        self.on_attach()
-
-    def addon(self, cls: Union[str, Type[TAddon]]) -> TAddon:
-        return self.helper.addon(cls)
-
-    def on_attach(self) -> None:
-        """callback"""
-
-    @property
-    def device(self):
-        return self.helper.device
-
-    @property
-    def viewport(self):
-        self.helper._ensure_device()
-        return self.helper.viewport
-
-    @property
-    def vw(self):
-        self.helper._ensure_device()
-        return self.helper.vw
-
-    @property
-    def vh(self):
-        self.helper._ensure_device()
-        return self.helper.vh
-
-    @property
-    def frontend(self):
-        return self.helper.frontend
-
-    def register_cli_command(self, command: str, handler: Callable[[Annotated[Sequence[str], "argv"]], int], help: Union[str, None]=None):
-        if help is None:
-            help = command
-        self.helper._cli_commands[command] = (command, handler, help)
-
-    def register_gui_handler(self, handler):
-        pass
+from .control.adb.client import get_config_adb_server
+from .control.ADBController import ADBController
+from .frontend import Frontend, DummyFrontend
+from .mixin import AddonMixin
 
 class BaseAutomator(AddonMixin):
     frontend: Frontend
-    def __init__(self, device_connector=auto_connect, frontend=None):  # 当前绑定到的设备
-        self._device = None
-        if device_connector is None:
-            pass
-        elif device_connector is auto_connect:
-            self.connect_device(auto_connect())
-        else:
-            self.connect_device(device_connector)
-        if frontend is None:
-            frontend = DummyFrontend()
+    def __init__(self, device_connector=None, frontend=None):  # 当前绑定到的设备
+        self.logger = logging.getLogger(type(self).__name__)
         self.frontend = frontend
         self.frontend.attach(self)
         self.helper = self
-        self.logger = logging.getLogger(self.__class__.__name__)
         self.addons: dict[Union[str, Type[TAddon]], TAddon] = {}
         self._cli_commands = OrderedDict()
         self.load_addons()
+        self.vw = 0
+        self.vh = 0
+        self._controller: Optional[Controller] = None
+        if device_connector is not None:
+            self.connect_device(device_connector)
+        if frontend is None:
+            frontend = DummyFrontend()
+
         logger.debug("成功初始化模块")
 
+
     def addon(self, cls: Union[ForwardRef[Type[TAddon]], Type[TAddon]]) -> TAddon:
-        if cls in self.addons:
-            return self.addons[cls]
-        elif type(cls) == type:
-            logger.debug("loading addon %s", cls.__qualname__)
-            instance = cls(self)
-            self.addons[cls] = instance
-            alias = getattr(instance, 'alias', None)
-            if alias is None:
-                alias = cls.__name__
-            self.addons[alias] = instance
+        from .addon import _addon_registry
+        dealias = _addon_registry[cls]
+        if dealias in self.addons:
+            return self.addons[dealias]
+        elif type(dealias) == type:
+            logger.debug("loading addon %s", dealias.__qualname__)
+            instance = dealias(self)
+            self.addons[dealias] = instance
             return instance
         else:
             raise TypeError("cls")
 
     def _ensure_device(self):
-        if self._device is None:
+        if self._controller is None:
             new_device = self.frontend.request_device_connector()
             if new_device is None:
                 raise RuntimeError("no device connected")
             self.connect_device(connector=new_device)
 
     @property
-    def device(self):
+    def control(self):
         self._ensure_device()
-        return self._device
+        return self._controller
 
     @property
     def viewport(self):
         self._ensure_device()
         return self._viewport
 
-    def connect_device(self, connector=None, *, adb_serial=None):
+    def connect_device(self, connector=None, *, adb_serial=None) -> Optional[Controller]:
+        old_controller = self._controller
         if connector is not None:
-            self._device = connector
+            self._controller = connector
         elif adb_serial is not None:
-            self._device = ADBConnector(adb_serial)
+            from automator.control.adb.targets import get_target_from_adb_serial
+            self._controller = get_target_from_adb_serial(adb_serial).create_controller()
         else:
-            self._device = None
-            return
-        self._viewport: tuple[int, int] = self._device.screen_size
-        if self._device.screenshot_rotate %180:
-            self._viewport = (self._viewport[1], self._viewport[0])
+            self._controller = None
+            return old_controller
+        self._viewport: tuple[int, int] = self._controller.screenshot().size
+        self.vw = self._viewport[0] / 100
+        self.vh = self._viewport[1] / 100
         self.on_device_connected()
+        self.frontend.notify('current-device', str(self._controller))
+        return old_controller
     
     def on_device_connected(self):
-        import imgreco
-        self.vw, self.vh = imgreco.get_vwvh(self.viewport)
-        if self._viewport[1] < 540 or Fraction(self._viewport[0], self._viewport[1]) < Fraction(16, 9):
-            title = '设备当前分辨率（%dx%d）不符合要求' % (self._viewport[0], self._viewport[1])
-            body = '需要宽高比等于或大于 16∶9，且渲染高度不小于 540。'
-            details = None
-            if Fraction(self._viewport[1], self._viewport[0]) >= Fraction(16, 9):
-                body = '屏幕截图可能需要旋转，请尝试在 device-config 中指定旋转角度。'
-                img = self._device.screenshot()
-                imgfile = os.path.join(config.SCREEN_SHOOT_SAVE_PATH, 'orientation-diagnose-%s.png' % time.strftime("%Y%m%d-%H%M%S"))
-                img.save(imgfile)
-                import json
-                details = '参考 %s 以更正 device-config.json[%s]["screenshot_rotate"]' % (imgfile, json.dumps(self._device.config_key))
-            for msg in [title, body, details]:
-                if msg is not None:
-                    logger.warn(msg)
-            self.frontend.alert(title, body, 'warn', details)
+        pass
 
     def load_addons(self):
         pass

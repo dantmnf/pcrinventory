@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import overload
+from typing import Optional, overload
 from numbers import Real
 
 import builtins
@@ -14,6 +14,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+from PIL import Image as PILImage
+
 
 def isPath(f):
     return isinstance(f, (bytes, str, Path))
@@ -120,6 +123,12 @@ def fromarray(array, mode=None):
             mode = 'RGBA'
     return Image(array, mode)
 
+def from_pil(pil_im: PILImage.Image):
+    from util import pil_zerocopy
+    array = pil_zerocopy.asarray(pil_im)
+    array = np.ascontiguousarray(array)
+    return fromarray(array, pil_im.mode)
+
 @dataclass
 class Rect:
     x: Real
@@ -171,10 +180,23 @@ class Rect:
         """describe this Rect in tuple of (left, top, right, bottom)"""
         return self.x, self.y, self.right, self.bottom
 
+    def round(self):
+        """return a Rect that rounded to nearest integer"""
+        return Rect.from_ltrb(*(round(x) for x in self.ltrb))
+
+    def scale(self, scale):
+        """return a Rect that scaled by given factor"""
+        return Rect(*(x*scale for x in self.xywh))
+
+    def iscale(self, scale):
+        """return a Rect that scaled by given factor and rounded to nearest integer"""
+        return self.scale(scale).round()
+
     def __iter__(self):
         return iter((self.x, self.y, self.right(), self.bottom()))
 
 class Image:
+    timestamp: Optional[float] = None
     def __init__(self, mat: np.ndarray, mode=None):
         self._mat = mat
         valid_modes = _get_valid_modes(mat.shape, mat.dtype)
@@ -194,6 +216,9 @@ class Image:
         array_intf = self._mat.__array_interface__
         array_intf_tup = tuple(array_intf.get(i, None) for i in keys)
         return builtins.hash((repr(array_intf_tup), self._mode))
+
+    def __repr__(self):
+        return f'<{self.__class__.__qualname__} size={self.width}x{self.height} mode={self.mode} dtype={self.dtype} timestamp={self.timestamp}>'
 
     @property
     def array(self):
@@ -218,6 +243,16 @@ class Image:
     @property
     def size(self) -> tuple[int, int]:
         return tuple(self._mat.shape[1::-1])
+
+    @overload
+    def subview(self, rect: Rect) -> Image:
+        """crop with Rect"""
+        ...
+
+    @overload
+    def subview(self, rect: tuple[Real, Real, Real, Real]) -> Image:
+        """crop with (left, top, right, bottom) tuple"""
+        ...
     
     @overload
     def crop(self, rect: Rect) -> Image:
@@ -229,17 +264,20 @@ class Image:
         """crop with (left, top, right, bottom) tuple"""
         ...
 
-    def crop(self, rect):
+    def subview(self, rect) -> Image:
         if rect is None:
-            return self.copy()
+            return self
         if isinstance(rect, Rect):
-            left, top, right, bottom = rect.ltrb
+            left, top, right, bottom = (int(round(x)) for x in rect.ltrb)
         else:
             left, top, right, bottom = (int(round(x)) for x in rect)
-        newmat = self._mat[top:bottom, left:right].copy()
+        newmat = self._mat[top:bottom, left:right]
         return Image(newmat, self.mode)
+
+    def crop(self, rect):
+        return self.subview(rect).copy()
     
-    def convert(self, mode=None, matrix=NotImplemented, dither=NotImplemented, palette=NotImplemented, colors=NotImplemented):
+    def convert(self, mode=None, matrix=NotImplemented, dither=NotImplemented, palette=NotImplemented, colors=NotImplemented) -> Image:
         if matrix is not NotImplemented or dither is not NotImplemented or palette is not NotImplemented or colors is not NotImplemented:
             raise NotImplementedError()
         from_cv_mode = pil_mode_mapping[self.mode]
@@ -416,7 +454,57 @@ class Image:
         title = f'Image: {self.width}x{self.height} {self.mode} {self.dtype}'
         multiprocessing.Process(target=_cvimage_imshow_helper.imshow, args=(title, native.array)).start()
 
-    def to_pil(self):
-        from PIL import Image
-        target_pil_mode = self.mode.replace('BGR', 'RGB')
-        return Image.fromarray(self.convert(target_pil_mode).array, target_pil_mode)
+    def to_pil(self, always_copy):
+        result, copied = self.to_pil2(always_copy)
+        return result
+
+    def to_pil2(self, always_copy=False) -> tuple[PILImage.Image, bool]:
+        """returns a PIL image and a flag indicating whether the image was copied or not"""
+        oldmat = self.array
+        need_convert = None
+        real_pil_mode = self.mode
+        pil_internal_mode = None
+        w, h = self.size
+        if self.mode == 'RGB' or self.mode == 'BGR':
+            need_convert = 'RGBA'
+            real_pil_mode = 'RGB'
+            pil_internal_mode = 'RGBA'
+        elif self.mode[0:3] == 'BGR':
+            need_convert = 'RGB' + self.mode[3:]
+            real_pil_mode = need_convert
+        if pil_internal_mode is None:
+            pil_internal_mode = real_pil_mode
+        if need_convert is not None:
+            img = self.convert(need_convert)
+        else:
+            img = self
+        if always_copy and img is self:
+            img = img.copy()
+        mat = img.array
+        assert mat.dtype == np.uint8
+        if not mat[0].data.c_contiguous:
+            mat = np.ascontiguousarray(mat)
+        ystride = mat.strides[0]
+        ystep = 1
+        if ystride < 0:
+            ystride = -ystride
+            ystep = -1
+        fulllen = ystride * h
+        contmat = np.lib.stride_tricks.as_strided(mat[::ystep, ...], shape=(fulllen,), strides=(1,))
+        return PILImage.frombuffer(real_pil_mode, (w, h), contmat, 'raw', pil_internal_mode, ystride, ystep), mat is not oldmat
+
+def _test():
+    im = open(r"D:\dant\Pictures\items\100px-道具_带框_量子二踢脚.png", cv2.IMREAD_COLOR)
+    im = im.subview((20, 20, 70, 70))
+    im.show()
+    bio = io.BytesIO()
+    pil_im = im.to_pil()
+    pil_im.show()
+    pil_im.save(bio, 'png')
+    bio.seek(0)
+    im2 = open(bio)
+    im2.show()
+
+
+if __name__ == '__main__':
+    _test()

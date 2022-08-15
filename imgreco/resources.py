@@ -1,12 +1,14 @@
+from __future__ import annotations
 import os
 import pickle
 from functools import lru_cache
 import json
-
+from typing import TYPE_CHECKING
+import cv2
 import numpy as np
 from util import cvimage as Image
 
-import config
+import app
 
 class ResourceArchiveIndex:
     def __init__(self, archive, archive_path):
@@ -25,10 +27,10 @@ class FileSystemIndex:
     def __hash__(self):
         return hash((FileSystemIndex, self.path))
 
-if config.use_archived_resources:
+if app.use_archived_resources:
     import zipfile
     root = 'resources/imgreco'
-    archive = zipfile.ZipFile(open(config.resource_archive, 'rb'), 'r')
+    archive = zipfile.ZipFile(open(app.resource_archive, 'rb'), 'r')
 
     filelist = archive.namelist()
 
@@ -63,14 +65,14 @@ if config.use_archived_resources:
                     files.append(name)
         return dirs, files
 else:
-    root = os.path.join(config.resource_root, 'imgreco')
+    root = app.resource_root.joinpath('imgreco')
 
     def get_path(names):
-        return os.path.join(root, *names)
+        return root.joinpath(*names)
 
     def _get_index(names):
         path = get_path(names)
-        fspath = os.path.join(root, path)
+        fspath = root.joinpath(path)
         if os.path.exists(fspath):
             return FileSystemIndex(fspath)
         else:
@@ -97,7 +99,7 @@ def open_file(respath):
     return resolve(respath).open()
 
 
-def load_image(name, mode=None, imread_flags=None):
+def load_image(name, mode=None, imread_flags=None) -> Image.Image:
     if imread_flags is None:
         im = Image.open(open_file(name))
         if mode is not None and im.mode != mode:
@@ -108,8 +110,8 @@ def load_image(name, mode=None, imread_flags=None):
 
 
 @lru_cache(maxsize=None)
-def load_image_cached(name, mode=None):
-    return load_image(name, mode)
+def load_image_cached(name, mode=None, imread_flags=None):
+    return load_image(name, mode, imread_flags)
 
 
 def load_image_as_ndarray(name):
@@ -130,14 +132,28 @@ def load_minireco_model(name, filter_chars=None):
     return model
 
 
-def load_roi(basename, image_mode='RGB'):
+if TYPE_CHECKING:
+    from .common import RegionOfInterest as RegionOfInterest_ghost
+
+def load_roi(basename, image_mode='RGB', metafile=None, imgfile=None) -> RegionOfInterest_ghost:
     from .common import RegionOfInterest
-    metafile = basename + '.roi.json'
-    imgfile = basename + '.png'
+    if metafile is None:
+        metafile = basename + '.roi.json'
+    if imgfile is None:
+        imgfile = basename + '.png'
     imgfileindex = resolve(imgfile)
-    img = load_image_cached(imgfileindex, image_mode) if imgfileindex is not None else None
-    with open_file(metafile) as f:
-        meta = json.load(f)
-    bbox_matrix = np.asmatrix(meta['bbox_matrix']) if 'bbox_matrix' in meta else None
-    native_resolution = tuple(meta['native_resolution']) if 'native_resolution' in meta else None
-    return RegionOfInterest(template=img, bbox_matrix=bbox_matrix, native_resolution=native_resolution)
+    raw_img = load_image_cached(imgfileindex, imread_flags=cv2.IMREAD_UNCHANGED) if imgfileindex is not None else None
+    mask = None
+    if raw_img is not None:
+        if raw_img.mode.endswith('A'):
+            mask = Image.fromarray(np.ascontiguousarray(raw_img.array[..., -1]), 'L')
+        img = raw_img.convert(image_mode)
+    try:
+        with open_file(metafile) as f:
+            meta = json.load(f)
+        bbox_matrix = np.asmatrix(meta['bbox_matrix']) if 'bbox_matrix' in meta else None
+        native_resolution = tuple(meta['native_resolution']) if 'native_resolution' in meta else None
+    except:
+        bbox_matrix = None
+        native_resolution = None
+    return RegionOfInterest(name=basename, template=img, mask=mask, bbox_matrix=bbox_matrix, native_resolution=native_resolution)

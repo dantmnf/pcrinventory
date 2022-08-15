@@ -117,26 +117,33 @@ def scalecrop(img, left, top, right, bottom):
     return img.crop(rect)
 
 
-def compare_mse(mat1, mat2):
+def compare_mse(mat1, mat2, mask=None):
     """max 65025 (255**2) for 8bpc image"""
     mat1 = np.asarray(mat1)
     mat2 = np.asarray(mat2)
     assert (mat1.shape == mat2.shape)
     diff = mat1.astype(np.float32) - mat2.astype(np.float32)
+    if mask is not None:
+        mask = np.asarray(mask)
+        diff[mask == 0] = 0
     mse = np.mean(diff * diff)
     return mse
 
 
-def scale_to_height(img, height, algo=Image.BILINEAR):
+def scale_to_height(img: Image.Image, height, algo=Image.BILINEAR):
+    if img.height == height:
+        return img
     scale = height / img.height
     return img.resize((int(img.width * scale), height), algo)
 
 
-def compare_ccoeff(img1, img2):
+def compare_ccoeff(img1, img2, mask=None):
     img1 = np.asarray(img1)
     img2 = np.asarray(img2)
+    if mask is not None:
+        mask = np.asarray(mask)
     assert (img1.shape == img2.shape)
-    result = cv.matchTemplate(img1, img2, cv.TM_CCOEFF_NORMED)[0, 0]
+    result = cv.matchTemplate(img1, img2, cv.TM_CCOEFF_NORMED, mask=mask)[0, 0]
     return result
 
 
@@ -157,32 +164,84 @@ def invert_color(img):
     return Image.fromarray(resultmat, img.mode)
 
 
-def match_template(img, template, method=cv.TM_CCOEFF_NORMED):
+def match_template(img, template, method=cv.TM_CCOEFF_NORMED, template_mask=None) -> tuple[tuple[int, int], float]:
+    """returns *center* point of matched template and matching score"""
     templatemat = np.asarray(template)
-    mtresult = cv.matchTemplate(np.asarray(img), templatemat, method)
+    mtresult = cv.matchTemplate(np.asarray(img), templatemat, method, mask=template_mask)
+    minval, maxval, minloc, maxloc = cv.minMaxLoc(mtresult)
     if method == cv.TM_SQDIFF_NORMED or method == cv.TM_SQDIFF:
-        selector = np.argmin
+        useloc = minloc
+        useval = minval
     else:
-        selector = np.argmax
-    maxidx = np.unravel_index(selector(mtresult), mtresult.shape)
-    y, x = maxidx
-    return (x + templatemat.shape[1] / 2, y + templatemat.shape[0] / 2), mtresult[maxidx]
+        useloc = maxloc
+        useval = maxval
+    x, y = useloc
+    return (x + templatemat.shape[1] / 2, y + templatemat.shape[0] / 2), useval
 
 
 @dataclass
 class FeatureMatchingResult:
     template_keypooint_count: int
     matched_keypoint_count: int
-    template_corners: Union[list[tuple[int, int]], np.ndarray, None]
+    template_corners: Union[list[tuple[int, int]], np.ndarray, None] = None
+    M: np.ndarray = None
 
 
-def match_feature(templ, haystack, *, min_match=10) -> FeatureMatchingResult:
+def match_feature_orb(templ, haystack, *, min_match=10, templ_mask=None, haystack_mask=None, limited_transform=False) -> FeatureMatchingResult:
+    templ = np.asarray(templ.convert('L'))
+    haystack = np.asarray(haystack.convert('L'))
+
+    detector = cv.ORB_create(10000)
+    descriptor = cv.xfeatures2d.BEBLID_create(0.75)
+    # descriptor = detector
+    kp1 = detector.detect(templ, templ_mask)
+    kp2 = detector.detect(haystack, haystack_mask)
+    kp1, des1 = descriptor.compute(templ, kp1)
+    kp2, des2 = descriptor.compute(haystack, kp2)
+
+    index_params = dict(algorithm=6,
+                        table_number=6,
+                        key_size=12,
+                        multi_probe_level=1)
+    search_params = {}
+    matcher = cv.FlannBasedMatcher(index_params, search_params)
+    # matcher = cv.BFMatcher_create(cv.NORM_HAMMING)
+    matches = matcher.knnMatch(des1, des2, k=2)
+    good = []
+    for group in matches:
+        if len(group) >= 2 and group[0].distance < 0.75 * group[1].distance:
+            good.append(group[0])
+
+    result = FeatureMatchingResult(len(kp1), len(good))
+
+    if len(good) >= min_match:
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+
+        if limited_transform:
+            M, _ = cv.estimateAffinePartial2D(src_pts, dst_pts)
+        else:
+            M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 4.0)
+
+        h, w = templ.shape
+        pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
+        if limited_transform:
+            dst = cv.transform(pts, M)
+        else:
+            dst = cv.perspectiveTransform(pts, M)
+        result.M = M
+        result.template_corners = dst.reshape(-1, 2)
+        # img2 = cv.polylines(haystack, [np.int32(dst)], True, 0, 2, cv.LINE_AA)
+    return result
+
+
+def match_feature(templ, haystack, *, min_match=10, templ_mask=None, haystack_mask=None, limited_transform=False) -> FeatureMatchingResult:
     templ = np.asarray(templ.convert('L'))
     haystack = np.asarray(haystack.convert('L'))
 
     detector = cv.SIFT_create()
-    kp1, des1 = detector.detectAndCompute(templ, None)
-    kp2, des2 = detector.detectAndCompute(haystack, None)
+    kp1, des1 = detector.detectAndCompute(templ, templ_mask)
+    kp2, des2 = detector.detectAndCompute(haystack, haystack_mask)
 
     # index_params = dict(algorithm=6,
     #                     table_number=6,
@@ -203,13 +262,19 @@ def match_feature(templ, haystack, *, min_match=10) -> FeatureMatchingResult:
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
-        M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 5.0)
-        matchesMask = mask.ravel().tolist()
+        if limited_transform:
+            M, _ = cv.estimateAffinePartial2D(src_pts, dst_pts)
+        else:
+            M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 4.0)
 
         h, w = templ.shape
         pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
-        dst = cv.perspectiveTransform(pts, M)
-        result.perspective_template_corners = dst
+        if limited_transform:
+            dst = cv.transform(pts, M)
+        else:
+            dst = cv.perspectiveTransform(pts, M)
+        result.M = M
+        result.template_corners = dst.reshape(-1, 2)
         # img2 = cv.polylines(haystack, [np.int32(dst)], True, 0, 2, cv.LINE_AA)
     return result
 
@@ -224,6 +289,7 @@ def _find_homography_test(templ, haystack):
 
 
 def compare_region_mse(img, region, template, threshold=3251, logger=None):
+    '''DEPPRECATED: use match_roi instead'''
     if isinstance(template, str):
         from . import resources
         template = resources.load_image_cached(template, img.mode)
@@ -236,3 +302,11 @@ def compare_region_mse(img, region, template, threshold=3251, logger=None):
     if threshold is not None:
         return mse < threshold
     return mse
+
+def pad(img, size, value=None):
+    if value is None:
+        mode = cv.BORDER_REPLICATE
+    else:
+        mode = cv.BORDER_CONSTANT
+    mat = cv.copyMakeBorder(np.asarray(img), size, size, size, size, mode, value=value)
+    return Image.fromarray(mat, img.mode)

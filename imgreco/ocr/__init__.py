@@ -3,6 +3,7 @@ from functools import lru_cache
 
 from . import dummy
 from .common import OcrEngine, OcrHint, OcrLine, OcrResult, OcrWord
+import atexit
 
 available_engines = ['tesseract', 'windows_media_ocr', 'baidu']
 """
@@ -36,11 +37,11 @@ def _auto_impl():
 
 @lru_cache()
 def get_config_impl():
-    import config
-    if config.engine == 'auto':
+    import app
+    if app.config.ocr.backend == 'auto':
         engine = _auto_impl()
     else:
-        engine = get_impl(config.engine)
+        engine = get_impl(app.config.ocr.backend)
     return engine
 
 
@@ -48,3 +49,15 @@ def get_config_impl():
 def acquire_engine_global_cached(lang, **kwargs) -> OcrEngine:
     impl = get_config_impl()
     return impl.Engine(lang, **kwargs)
+
+atexit.register(acquire_engine_global_cached.cache_clear)
+
+
+def match_distance(text, collection):
+    import textdistance
+    comparisions = []
+    for index, item in enumerate(collection):
+        if text == item:
+            return index, 0
+        comparisions.append((index, textdistance.levenshtein(text, item)))
+    return min(comparisions, key=lambda x: x[1])
